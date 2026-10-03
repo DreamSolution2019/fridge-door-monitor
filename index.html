@@ -1,0 +1,1120 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>냉장고 문 모니터 | 드림솔루션</title>
+<!--
+  EN25-Absolute 로 냉장고 문 열림/닫힘 감지 (웹 버전)
+  - fridge_door_monitor.py 를 웹으로 옮긴 것
+  - Chrome / Edge 에서 이 파일을 더블클릭해서 열면 됩니다 (Web Serial API 사용)
+  - 엔코더 출력: 38400bps, 100Hz, "$ANG,152.3,11.644,110\r\n"
+-->
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --text: #1d2330; --muted: #6b7384;
+    --line: #e2e6ee; --accent: #2f6fed; --blue: #2f6fed;
+    --open: #e5484d; --open-bg: #fdecec; --closed: #1f9d55; --closed-bg: #e7f6ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e8ebf1; --muted: #9aa3b2;
+      --line: #2c3340; --accent: #6b9bff; --blue: #6b9bff;
+      --open: #ff6b6f; --open-bg: #3a1d20; --closed: #4cc68a; --closed-bg: #16301f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 20px 16px 40px; }
+  /* 헤더: 로고 + 제목 + 상품 링크 */
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .logo {
+    /* 160x160 로고에서 글씨가 있는 가운데 띠만 보이도록 잘라서 원본 크기로 표시 */
+    width: 160px; height: 64px; object-fit: cover; object-position: center;
+    border-radius: 10px; flex-shrink: 0;
+  }
+  .titles { flex: 1; min-width: 240px; }
+  .brand { font-size: 13px; font-weight: 600; color: var(--accent); letter-spacing: .02em; }
+  h1 { font-size: 24px; margin: 2px 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .product-link {
+    display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+    padding: 10px 16px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    background: var(--accent); color: #fff; text-decoration: none;
+  }
+  .product-link:hover { filter: brightness(1.08); }
+  @media (max-width: 760px) { .product-link { width: 100%; justify-content: center; } }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  button {
+    font: inherit; font-size: 14px; padding: 9px 14px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .conn { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         background: #999; margin-right: 6px; vertical-align: middle; }
+  .dot.on { background: var(--closed); }
+
+  /* 상태 카드 */
+  .status {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 24px;
+    padding: 26px; transition: background .3s, border-color .3s;
+  }
+  .status.open { background: var(--open-bg); border-color: var(--open); }
+  .status.closed { background: var(--closed-bg); border-color: var(--closed); }
+  .status .icon { font-size: 64px; line-height: 1; }
+  .status .big { font-size: 34px; font-weight: 700; }
+  .status.open .big { color: var(--open); }
+  .status.closed .big { color: var(--closed); }
+  .status .detail { color: var(--muted); margin-top: 6px; font-size: 15px; }
+  .nums { margin-left: auto; display: flex; gap: 26px; text-align: right; }
+  .nums .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .nums .l { font-size: 12px; color: var(--muted); }
+  @media (max-width: 760px) {
+    .status { flex-wrap: wrap; }
+    .nums { margin-left: 0; text-align: left; }
+  }
+
+  /* 설정 */
+  label.set { display: block; font-size: 14px; margin: 12px 0 4px; }
+  label.set b { float: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-top: 12px; }
+
+  /* 다이얼 */
+  svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  /* 로그 */
+  .log { max-height: 260px; overflow-y: auto; font-size: 14px; }
+  .log div { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .log .t { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+  .log .o { color: var(--open); font-weight: 600; }
+  .log .c { color: var(--closed); font-weight: 600; }
+  .log .w { color: #d98a00; font-weight: 600; }
+  .warn { background: #fff4d6; color: #6b4b00; border-radius: 10px;
+          padding: 12px 14px; font-size: 14px; margin-bottom: 16px; display: none; }
+  .sim { display: none; margin-top: 12px; }
+
+  /* 체험 모드 배너 */
+  .demo-banner {
+    display: none; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: var(--card); border: 2px solid var(--accent); border-radius: 14px;
+    padding: 14px 18px; margin-bottom: 16px; font-size: 14px;
+  }
+  .demo-banner .msg { flex: 1; min-width: 240px; line-height: 1.5; }
+  .demo-banner b { color: var(--accent); }
+
+  /* 그래프 */
+  #chart { display: block; width: 100%; height: 240px; margin-top: 6px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; }
+  .legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .legend small { color: var(--muted); }
+  .stats { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .stats b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  /* 소스코드 다운로드 */
+  .promo p { margin: 0 0 12px; font-size: 14px; line-height: 1.6; }
+  .promo ul { margin: 12px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.7; }
+  .promo code { background: var(--bg); padding: 1px 6px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img class="logo" src="data:image/jpeg;base64,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" alt="Dream Solution 드림솔루션">
+    <div class="titles">
+      <div class="brand">드림솔루션 · 앱솔루트 로터리엔코더 EN25-Absolute</div>
+      <h1>냉장고 문 모니터</h1>
+      <div class="sub">EN25-Absolute로 냉장고 문의 각도를 측정해 열림·닫힘을 감지하고 음성으로 알려드려요</div>
+    </div>
+    <a class="product-link" href="https://www.dreamparts.co.kr/goods/goods_view.php?goodsNo=1000000042"
+       target="_blank" rel="noopener">상품 상세정보 보기 ↗</a>
+  </header>
+
+  <!-- 체험 모드: 주소 뒤에 ?demo 를 붙이거나, 엔코더 연결이 안 되는 브라우저(휴대폰 등)에서 표시 -->
+  <div class="demo-banner" id="demoBanner">
+    <div class="msg">
+      <b>🎬 체험 모드</b> — 엔코더 없이 가상의 냉장고 문이 자동으로 열리고 닫혀요.
+      실제 EN25-Absolute를 연결하면 이 화면이 그대로 동작해요.
+    </div>
+    <button class="primary" id="btnDemo">▶ 체험 시작 (소리 켜짐)</button>
+    <a class="product-link" href="https://www.dreamparts.co.kr/goods/goods_view.php?goodsNo=1000000042"
+       target="_blank" rel="noopener">EN25-Absolute 구매하기 ↗</a>
+  </div>
+
+  <div class="warn" id="noSerial">
+    이 브라우저는 USB 시리얼 연결(Web Serial)을 지원하지 않아요.
+    실제 엔코더 연결은 PC의 <b>Chrome</b> 또는 <b>Edge</b> 에서 할 수 있어요. 위의 ‘체험 시작’으로 동작을 미리 볼 수 있어요.
+  </div>
+
+  <div class="grid">
+    <!-- 상태 -->
+    <div class="card status" id="statusCard">
+      <div class="icon" id="stIcon">🔌</div>
+      <div>
+        <div class="big" id="stText">연결 대기</div>
+        <div class="detail" id="stDetail">‘엔코더 연결’ 버튼을 눌러 COM 포트를 선택하세요.</div>
+      </div>
+      <div class="nums">
+        <div><div class="v" id="nAngle">–</div><div class="l">현재 각도</div></div>
+        <div><div class="v" id="nDelta">–</div><div class="l">기준각 대비 변화</div></div>
+        <div><div class="v" id="nOpenTime">–</div><div class="l">열린 시간</div></div>
+      </div>
+    </div>
+
+    <!-- 연결 / 다이얼 -->
+    <div class="card">
+      <h2>연결</h2>
+      <div class="row">
+        <button class="primary" id="btnConnect">엔코더 연결</button>
+        <button id="btnDisconnect" disabled>연결 끊기</button>
+        <button id="btnCalib" disabled>지금 각도를 ‘닫힘’으로</button>
+      </div>
+      <div class="conn"><span class="dot" id="dot"></span><span id="connText">연결 안 됨</span></div>
+
+      <!-- 기준각 대비 변화 각도 계기판: 맨 위 0° = 닫힘 기준, 좌우 ±60° -->
+      <svg id="dial" viewBox="0 0 240 232" width="260" height="251" style="margin-top:14px">
+        <path id="arcTrack" fill="none" stroke="var(--line)" stroke-width="14"/>
+        <path id="arcOpenL" fill="none" stroke="var(--open)" stroke-opacity=".3" stroke-width="14"/>
+        <path id="arcOpenR" fill="none" stroke="var(--open)" stroke-opacity=".3" stroke-width="14"/>
+        <path id="arcClose" fill="none" stroke="var(--closed)" stroke-opacity=".6" stroke-width="14"/>
+        <g id="ticks"></g>
+        <line id="needle" x1="120" y1="120" x2="120" y2="34" stroke="var(--text)" stroke-width="4" stroke-linecap="round"/>
+        <circle cx="120" cy="120" r="8" fill="var(--text)"/>
+        <text x="120" y="172" text-anchor="middle" font-size="26" font-weight="700" fill="var(--text)" id="dialText">–</text>
+        <text x="120" y="212" text-anchor="middle" font-size="11" fill="var(--muted)">기준각 대비 변화 (열림 방향 +)</text>
+        <text x="120" y="227" text-anchor="middle" font-size="10" fill="var(--muted)">초록 = 닫힘 구간 · 빨강 = 열림 구간</text>
+      </svg>
+    </div>
+
+    <!-- 설정 -->
+    <div class="card">
+      <h2>설정</h2>
+      <label class="set">열림 판단 각도 (기준각에서 이만큼 벗어나면 ‘열림’) <b id="vOpen">5.0°</b></label>
+      <input type="range" id="sOpen" min="1" max="45" step="0.5" value="5">
+      <label class="set">닫힘 판단 각도 (기준각에서 이 안으로 들어오면 ‘닫힘’) <b id="vClose">2.0°</b></label>
+      <input type="range" id="sClose" min="0.5" max="20" step="0.5" value="2">
+      <label class="set">오래 열려 있을 때 다시 알림 <b id="vRemind">10초</b></label>
+      <input type="range" id="sRemind" min="0" max="120" step="5" value="10">
+
+      <div class="check"><input type="checkbox" id="cVoice" checked><label for="cVoice">음성 안내 켜기</label>
+        <button id="btnTest" style="margin-left:auto">음성 테스트</button></div>
+      <div class="check"><input type="checkbox" id="cSim"><label for="cSim">시뮬레이션 (엔코더 없이 체험)</label></div>
+      <div class="sim" id="simBox">
+        <label class="set">가상 엔코더 각도 <b id="vSim">0.0°</b></label>
+        <input type="range" id="sSim" min="-40" max="40" step="0.1" value="0">
+        <div class="check"><input type="checkbox" id="cAuto"><label for="cAuto">자동 시연 (문이 저절로 열렸다 닫힘)</label></div>
+      </div>
+    </div>
+
+    <!-- 실시간 그래프 + CSV -->
+    <div class="card" style="grid-column:1/-1">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">실시간 각도 그래프 (최근 60초)</h2>
+        <div class="row">
+          <button id="btnCsvEvents">📄 개폐 기록 CSV</button>
+          <button id="btnCsvData">📈 각도 데이터 CSV</button>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--open)"></i>기준각 대비 변화</span>
+      </div>
+      <canvas id="chart"></canvas>
+      <div class="stats">
+        <span>총 열린 시간 <b id="stTotal">0초</b></span>
+        <span>가장 오래 열린 시간 <b id="stMax">0초</b></span>
+        <span>평균 열린 시간 <b id="stAvg">–</b></span>
+        <span>저장된 각도 데이터 <b id="stRows">0</b>개 <small>(0.1초 간격, 최근 1시간)</small></span>
+      </div>
+    </div>
+
+    <!-- 기록 -->
+    <div class="card" style="grid-column:1/-1">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">기록</h2>
+        <div class="row"><span style="font-size:13px;color:var(--muted)">오늘 열린 횟수 <b id="nCount">0</b>회</span>
+          <button id="btnClear">지우기</button></div>
+      </div>
+      <div class="log" id="log" style="margin-top:10px"></div>
+    </div>
+
+    <!-- 소스코드 무료 다운로드 -->
+    <div class="card promo" style="grid-column:1/-1">
+      <h2>📦 이 예제 소스코드 무료 다운로드</h2>
+      <p>EN25-Absolute만 있으면 지금 보시는 냉장고 문 모니터를 그대로 만들 수 있어요.
+         웹페이지는 설치 없이 Chrome·Edge로 열기만 하면 되고 파이썬 코드는 IDLE에서 F5로 실행됩니다.</p>
+      <div class="row">
+        <button class="primary" id="dlHtml">🌐 웹페이지 (.html)</button>
+        <button class="primary" id="dlPy">🐍 파이썬 코드 (.zip)</button>
+        <a class="product-link" href="https://www.dreamparts.co.kr/goods/goods_view.php?goodsNo=1000000042"
+           target="_blank" rel="noopener">EN25-Absolute 구매하기 ↗</a>
+      </div>
+      <ul>
+        <li>준비물: 앱솔루트 로터리엔코더 EN25-Absolute, USB TO RS232/TTL 컨버터 모듈, 냉장고에 붙일 링크·자석 브라겟 세트(모든 준비물은 구매하기에서 구매가능)</li>
+        <li>배선: 빨강 → 5V, 초록 → GND, 흰색(RS232) → USB TO RS232/TTL 컨버터 모듈의 RX · 통신속도 38400bps</li>
+        <li>파이썬: Python 3 설치 후 <code>pip install pyserial pywin32</code> → 파일 위쪽의 <code>PORT</code> 값만 맞추고 실행</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 다운로드용 파이썬 소스 (화면에는 안 보임) -->
+<script type="text/plain" id="srcPython">
+# -*- coding: utf-8 -*-
+"""
+EN25-Absolute 로 냉장고 문 열림/닫힘 감지 예제
+------------------------------------------------
+- 엔코더 출력: 38400bps, 100Hz,  "$ANG,152.3,11.644,110\r\n"
+                                   (절대각도[deg], 누적회전수[rev], RPM)
+- 프로그램 시작 시 문이 '닫힌 상태'의 각도를 기준각으로 자동 저장합니다.
+- 기준각에서 OPEN_THRESHOLD 이상 벗어나면 '열림', CLOSE_THRESHOLD 이내로
+  돌아오면 '닫힘'으로 판단합니다. (히스테리시스로 경계에서 떨림 방지)
+- 문이 열리면 "냉장고 문이 열렸어요" 음성을 출력합니다.
+
+필요 패키지:
+    pip install pyserial pywin32
+
+실행 방법:
+    1) IDLE 에서 이 파일을 열고 F5 (Run Module)  ← 아래 PORT 값만 맞추면 됨
+    2) 명령창:  python fridge_door_monitor.py --port COM5 --open 8 --close 3
+"""
+
+import argparse
+import queue
+import sys
+import threading
+import time
+
+import serial
+import serial.tools.list_ports
+
+# ======== 여기만 바꾸세요 ========
+PORT = "COM5"          # 엔코더가 연결된 포트 (장치관리자 > 포트(COM & LPT) 에서 확인)
+OPEN_THRESHOLD = 5.0   # 기준각에서 이 각도 이상 벗어나면 '열림'
+CLOSE_THRESHOLD = 2.0  # 기준각에서 이 각도 이내로 돌아오면 '닫힘'
+REMIND_SEC = 10.0      # 열린 채로 이 시간(초)이 지나면 다시 알림 (0=끄기)
+# ================================
+
+BAUDRATE = 38400
+IN_IDLE = "idlelib" in sys.modules  # IDLE 은 \r 한 줄 갱신을 지원하지 않음
+
+# ---------------- 음성 출력 (별도 스레드) ----------------
+_speech_queue = queue.Queue()
+
+
+def _speech_worker():
+    # pyttsx3 는 Windows 에서 두 번째 runAndWait() 부터 소리가 안 나는 버그가 있어
+    # Windows 음성엔진(SAPI)을 직접 사용한다. (pyttsx3 설치 시 pywin32 가 함께 설치됨)
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()  # 별도 스레드에서 COM 사용 준비
+    voice = win32com.client.Dispatch("SAPI.SpVoice")
+    # 한국어 음성이 설치되어 있으면 선택 (Windows 기본: Microsoft Heami)
+    for v in voice.GetVoices():
+        desc = v.GetDescription()
+        if "korean" in desc.lower() or "heami" in desc.lower():
+            voice.Voice = v
+            break
+    voice.Rate = 0  # 말하기 속도 -10(느림) ~ 10(빠름)
+    while True:
+        text = _speech_queue.get()
+        voice.Speak(text)  # 말이 끝날 때까지 기다림 (측정은 메인 스레드에서 계속됨)
+
+
+def speak(text):
+    """음성 출력이 끝날 때까지 기다리지 않도록 큐에 넣기만 한다."""
+    _speech_queue.put(text)
+
+
+# ---------------- 엔코더 읽기 ----------------
+def parse_line(line):
+    """'$ANG,152.3,11.644,110' -> (152.3, 11.644, 110.0), 실패 시 None"""
+    if not line.startswith("$ANG"):
+        return None
+    parts = line.split(",")
+    if len(parts) < 4:
+        return None
+    try:
+        return float(parts[1]), float(parts[2]), float(parts[3])
+    except ValueError:
+        return None
+
+
+def read_angle(ser):
+    """한 줄을 읽어 절대각도를 반환 (읽기 실패 시 None)"""
+    raw = ser.readline().decode("ascii", errors="ignore").strip()
+    data = parse_line(raw)
+    return data[0] if data else None
+
+
+def angle_diff(a, b):
+    """a-b 를 -180~+180 범위로 (359.9° -> 0° 넘어갈 때 대비)"""
+    return (a - b + 180.0) % 360.0 - 180.0
+
+
+def calibrate(ser, samples=50):
+    """문이 닫힌 상태의 기준각을 평균으로 구한다 (약 0.5초)"""
+    print("문을 닫은 상태로 두세요. 기준각 측정 중...")
+    ser.reset_input_buffer()
+    values = []
+    start = time.time()
+    warned = False
+    while len(values) < samples:
+        raw = ser.readline()
+        data = parse_line(raw.decode("ascii", errors="ignore").strip())
+        if data:
+            values.append(data[0])
+        elif not warned and time.time() - start > 3:
+            warned = True
+            print("\n⚠ 3초 동안 엔코더 데이터($ANG,...)가 들어오지 않았어요.")
+            print(f"   마지막으로 받은 내용: {raw!r}")
+            print("   - b'' (아무것도 없음) 이면: 전원(빨강 5V/초록 GND) 또는")
+            print("     흰색(RS232) 선이 USB TO RS232/TTL 컨버터 RX 에 연결됐는지 확인하세요.")
+            print("   - 다른 프로그램이 이 포트를 쓰고 있으면 닫아주세요.")
+            print("   계속 기다리는 중... (중지: Ctrl+C)\n")
+    # 0/360 경계 근처에서도 올바르게 평균내기 위해 첫 값 기준 차이로 평균
+    ref = values[0]
+    avg = ref + sum(angle_diff(v, ref) for v in values) / len(values)
+    return avg % 360.0
+
+
+def main():
+    p = argparse.ArgumentParser(description="EN25-Absolute 냉장고 문 열림 감지")
+    p.add_argument("--port", default=PORT, help="시리얼 포트 (예: COM5)")
+    p.add_argument("--open", type=float, default=OPEN_THRESHOLD,
+                   help="기준각에서 이 각도 이상 벗어나면 '열림'")
+    p.add_argument("--close", type=float, default=CLOSE_THRESHOLD,
+                   help="기준각에서 이 각도 이내로 들어오면 '닫힘'")
+    p.add_argument("--closed-angle", type=float,
+                   help="닫힘 기준각을 직접 지정 (생략 시 시작할 때 자동 측정)")
+    p.add_argument("--remind", type=float, default=REMIND_SEC,
+                   help="열린 채로 이 시간(초)이 지나면 다시 알림 (0=끄기)")
+    args = p.parse_args()
+
+    try:
+        ser = serial.Serial(args.port, BAUDRATE, timeout=1)
+    except serial.SerialException as e:
+        print(f"{args.port} 포트를 열 수 없어요: {e}\n")
+        print("사용 가능한 포트:")
+        for port in serial.tools.list_ports.comports():
+            print(f"  {port.device}  -  {port.description}")
+        print("\n파일 위쪽의 PORT 값을 엔코더 포트로 바꿔주세요.")
+        print("(다른 프로그램이 이 포트를 쓰고 있으면 먼저 닫아주세요.)")
+        return
+
+    threading.Thread(target=_speech_worker, daemon=True).start()
+
+    with ser:
+        closed_angle = args.closed_angle if args.closed_angle is not None \
+            else calibrate(ser)
+        print(f"닫힘 기준각: {closed_angle:.1f}°  "
+              f"(열림 >= {args.open}°, 닫힘 <= {args.close}°)")
+        print("감시 시작... (종료: Ctrl+C)\n")
+
+        is_open = False
+        opened_at = 0.0
+        last_remind = 0.0
+        last_print = 0.0
+
+        while True:
+            ang = read_angle(ser)
+            if ang is None:
+                continue
+
+            delta = abs(angle_diff(ang, closed_angle))
+            now = time.time()
+
+            # 상태 판단 (히스테리시스)
+            if not is_open and delta >= args.open:
+                is_open = True
+                opened_at = last_remind = now
+                print(f"\n[{time.strftime('%H:%M:%S')}] 🔓 냉장고 문이 열렸어요! "
+                      f"(각도 {ang:.1f}°, 변화 {delta:.1f}°)")
+                speak("냉장고 문이 열렸어요")
+
+            elif is_open and delta <= args.close:
+                is_open = False
+                print(f"\n[{time.strftime('%H:%M:%S')}] 🔒 냉장고 문이 닫혔어요. "
+                      f"(열려 있던 시간 {now - opened_at:.1f}초)")
+
+            # 오래 열려 있으면 다시 알림
+            if is_open and args.remind > 0 and now - last_remind >= args.remind:
+                last_remind = now
+                print(f"\n[{time.strftime('%H:%M:%S')}] ⚠ 문이 "
+                      f"{int(now - opened_at)}초째 열려 있어요!")
+                speak("냉장고 문이 아직 열려 있어요. 문을 닫아주세요")
+
+            # 현재 상태 표시 (명령창: 0.2초마다 한 줄 갱신 / IDLE: 1초마다 새 줄)
+            interval = 1.0 if IN_IDLE else 0.2
+            if now - last_print >= interval:
+                last_print = now
+                state = "열림" if is_open else "닫힘"
+                text = f"각도 {ang:6.1f}°  변화 {delta:5.1f}°  상태: {state}"
+                if IN_IDLE:
+                    print(text)
+                else:
+                    print("\r" + text + "   ", end="", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n종료합니다.")
+    except serial.SerialException as e:
+        # 측정 도중 USB 를 뽑는 등 연결이 끊어진 경우
+        print(f"\n\n엔코더 연결이 끊어졌어요: {e}")
+        print("USB 케이블과 컨버터 연결을 확인한 뒤 다시 실행해주세요.")
+</script>
+
+<script>
+// 웹페이지 다운로드용: 화면이 바뀌기 전의 원본 HTML 을 먼저 저장해 둠
+const PAGE_SOURCE = "<!doctype html>\n" + document.documentElement.outerHTML;
+
+// ---------------- 설정값 ----------------
+const BAUDRATE = 38400;
+const PAGE_TITLE = document.title;
+const CALIB_SAMPLES = 50;              // 기준각 평균에 쓸 샘플 수 (약 0.5초)
+const $ = id => document.getElementById(id);
+const settings = { open: 5, close: 2, remind: 10, voice: true };   // remind: 오래 열려 있을 때 다시 알림(초)
+
+// ---------------- 상태 ----------------
+let port = null, reader = null, keepReading = false;
+let readClosed = null;                 // 포트 → 글자 변환 연결(pipeTo)이 끝나면 완료되는 Promise
+let closedAngle = null;                // 닫힘 기준각
+let calibBuf = [];                     // 기준각 측정용 버퍼
+let isOpen = false, openedAt = 0, lastRemind = 0;
+// 문이 열리는 방향을 + 로 표시하기 위한 부호 (0 = 아직 모름 → 처음 문이 열릴 때 자동으로 정함)
+// 엔코더를 어느 쪽으로 달아도 '문 열림 = +' 로 보이게 됨
+let openDir = 0;
+const toShown = raw => raw * (openDir || 1);   // 엔코더 방향(raw) → 화면 표시값
+let lastAngle = null, openCount = 0, countDay = new Date().toDateString();
+
+// ---------------- 각도 계산 ----------------
+// a-b 를 -180~+180 범위로 (359.9° → 0° 넘어갈 때 대비)
+// 소수 첫째 자리 각도 표시 ("-0.0°" 대신 "0.0°")
+const fmtDeg = v => (Math.abs(v) < 0.05 ? 0 : v).toFixed(1) + "°";
+const angleDiff = (a, b) => ((a - b + 180) % 360 + 360) % 360 - 180;
+
+function averageAngle(values) {
+  const ref = values[0];
+  const avg = ref + values.reduce((s, v) => s + angleDiff(v, ref), 0) / values.length;
+  return ((avg % 360) + 360) % 360;
+}
+
+// "$ANG,152.3,11.644,110" → {deg, rev, rpm}
+function parseLine(line) {
+  if (!line.startsWith("$ANG")) return null;
+  const p = line.split(",");
+  if (p.length < 4) return null;
+  const deg = parseFloat(p[1]), rev = parseFloat(p[2]), rpm = parseFloat(p[3]);
+  return isNaN(deg) ? null : { deg, rev, rpm };
+}
+
+// ---------------- 음성 ----------------
+let koVoice = null;
+function pickVoice() {
+  const vs = speechSynthesis.getVoices();
+  koVoice = vs.find(v => v.lang === "ko-KR" && /heami|google/i.test(v.name))
+         || vs.find(v => v.lang && v.lang.startsWith("ko")) || null;
+}
+if ("speechSynthesis" in window) {
+  pickVoice();
+  speechSynthesis.onvoiceschanged = pickVoice;
+}
+// 음성이 잘리거나 안 나오던 원인과 대책
+//  1) 매번 cancel() 후 바로 speak() → Chrome/Edge 는 cancel 직후의 speak 를 가끔 무시함
+//     → 실제로 말하는 중일 때만 cancel 하고, 그 뒤 0.15초 기다렸다가 speak
+//  2) 문이 경계 각도에서 열림/닫힘을 빠르게 반복하면 "열렸어요"가 계속 새로 시작되며 잘림
+//     → 같은 문장을 말하는 중이면 다시 시작하지 않음
+//  3) 말하는 도중 utterance 객체가 메모리에서 정리되면 소리가 중간에 끊김(Chrome 버그)
+//     → 현재 문장을 변수(currentUtter)에 붙잡아 둠
+//  4) 탭을 오래 켜 두면 음성엔진이 '일시정지' 상태로 멈춰 있는 경우가 있음
+//     → 말하기 전에 resume() 호출
+let currentUtter = null;
+function speak(text, isRemind = false) {
+  if (!settings.voice || !("speechSynthesis" in window)) return;
+  const synth = speechSynthesis;
+  const busy = synth.speaking || synth.pending;
+  if (busy && currentUtter && currentUtter.text === text) return;   // 같은 안내가 이미 나오는 중
+
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ko-KR";
+  if (koVoice) u.voice = koVoice;
+  u.rate = 1.0;
+  u.isRemind = isRemind;
+  if (isRemind) u.onstart = () => { if (!isOpen) synth.cancel(); };  // 말하기 직전에 문이 닫혔으면 취소
+  u.onend = () => { if (currentUtter === u) currentUtter = null; };
+  u.onerror = e => {
+    if (currentUtter === u) currentUtter = null;
+    if (e.error !== "interrupted" && e.error !== "canceled") log("w", `🔇 음성 출력 오류: ${e.error}`);
+  };
+
+  currentUtter = u;                                   // 3) 붙잡아 두기
+  if (busy) synth.cancel();                           // 1) 말하는 중일 때만 끊기
+  setTimeout(() => {
+    if (currentUtter !== u) return;                   // 그 사이 더 새로운 안내가 들어옴
+    synth.resume();                                   // 4) 멈춘 음성엔진 깨우기
+    synth.speak(u);
+  }, busy ? 150 : 0);
+}
+// 문이 닫히면 아직 나오고 있는 "문을 닫아주세요" 안내를 멈춤
+function stopRemindSpeech() {
+  if (currentUtter?.isRemind && "speechSynthesis" in window) {
+    currentUtter = null;
+    speechSynthesis.cancel();
+  }
+}
+
+// ---------------- 기록 ----------------
+const now = () => new Date().toTimeString().slice(0, 8);   // "15:03:16"
+function log(cls, msg) {
+  const d = document.createElement("div");
+  const t = document.createElement("span"), m = document.createElement("span");
+  t.className = "t"; t.textContent = now();
+  m.className = cls; m.textContent = msg;               // 오류 메시지 등이 HTML 로 해석되지 않도록
+  d.append(t, m);
+  $("log").prepend(d);
+}
+
+// ---------------- 핵심: 각도 한 개가 들어올 때마다 ----------------
+function onAngle(deg) {
+  lastAngle = deg;
+
+  // 1) 기준각 측정 중
+  if (closedAngle === null) {
+    calibBuf.push(deg);
+    setStatus("calib");
+    if (calibBuf.length >= CALIB_SAMPLES) {
+      closedAngle = averageAngle(calibBuf);
+      calibBuf = [];
+      log("c", `닫힘 기준각 설정: ${(Math.round(closedAngle * 10) / 10 % 360).toFixed(1)}°`);   // 359.97° → "0.0°"
+      $("btnCalib").disabled = false;
+    }
+    render(deg, null);
+    return;
+  }
+
+  // 2) 열림/닫힘 판단 (히스테리시스)
+  const delta = Math.abs(angleDiff(deg, closedAngle));
+  const t = Date.now();
+
+  if (!isOpen && delta >= settings.open) {
+    isOpen = true;
+    openedAt = lastRemind = t;
+    if (!openDir) {
+      openDir = Math.sign(angleDiff(deg, closedAngle)) || 1;
+      log("c", `↔ 문이 열리는 방향을 인식했어요. 이제 문 열림 방향이 + 로 표시돼요.`);
+    }
+    const today = new Date().toDateString();            // 날짜가 바뀌면 '오늘 열린 횟수' 를 0 부터 다시
+    if (today !== countDay) { countDay = today; openCount = 0; }
+    openCount++;
+    $("nCount").textContent = openCount;
+    log("o", `🔓 냉장고 문이 열렸어요! (각도 ${deg.toFixed(1)}°, 변화 ${delta.toFixed(1)}°)`);
+    addEvent(t, "열림", deg, delta, "");
+    speak("냉장고 문이 열렸어요");
+  } else if (isOpen && delta <= settings.close) {
+    isOpen = false;
+    stopRemindSpeech();
+    const dur = t - openedAt;
+    openDurations.push(dur);
+    log("c", `🔒 냉장고 문이 닫혔어요. (열려 있던 시간 ${(dur / 1000).toFixed(1)}초)`);
+    addEvent(t, "닫힘", deg, delta, (dur / 1000).toFixed(1));
+  }
+
+  // 3) 오래 열려 있으면 다시 알림
+  if (isOpen && settings.remind > 0 && t - lastRemind >= settings.remind * 1000) {
+    lastRemind = t;
+    const sec = Math.round((t - openedAt) / 1000);
+    log("w", `⚠ 문이 ${sec}초째 열려 있어요!`);
+    addEvent(t, "다시 알림", deg, delta, sec);
+    speak("냉장고 문이 아직 열려 있어요. 문을 닫아주세요", true);
+  }
+
+  recordSample(t, deg, angleDiff(deg, closedAngle));
+  render(deg, delta);
+}
+
+// ---------------- 화면 갱신 (초당 최대 약 30번) ----------------
+let pending = null;
+function render(deg, delta) {
+  pending = { deg, delta };
+  if (render.raf) return;
+  render.raf = requestAnimationFrame(() => {
+    render.raf = null;
+    const { deg, delta } = pending;
+    $("nAngle").textContent = deg.toFixed(1) + "°";
+    if (delta === null) {                              // 기준각 측정 중
+      $("dialText").textContent = "측정 중";
+      $("needle").setAttribute("transform", "rotate(0 120 120)");
+      return;
+    }
+    // 계기판: 기준각 대비 변화 (문 열리는 방향 = +, 예: +28.5°)
+    const signed = toShown(angleDiff(deg, closedAngle));
+    const shown = Math.max(-DIAL_RANGE, Math.min(DIAL_RANGE, signed));  // 범위 밖이면 끝에 고정
+    $("dialText").textContent = fmtDeg(signed);
+    $("needle").setAttribute("transform", `rotate(${shown * DIAL_SCALE} 120 120)`);
+    $("nDelta").textContent = fmtDeg(signed);   // 계기판·그래프와 같은 값
+    setStatus(isOpen ? "open" : "closed");
+  });
+}
+
+function setStatus(kind) {
+  const card = $("statusCard");
+  card.className = "card status " + (kind === "open" ? "open" : kind === "closed" ? "closed" : "");
+  const map = {
+    idle:   ["🔌", "연결 대기", "‘엔코더 연결’ 버튼을 눌러 COM 포트를 선택하세요."],
+    calib:  ["⏳", "기준각 측정 중", "문을 닫은 상태로 잠시 기다려 주세요..."],
+    open:   ["🔓", "문 열림", "냉장고 문이 열려 있어요."],
+    closed: ["🔒", "문 닫힘", "냉장고 문이 닫혀 있어요."],
+    nodata: ["⚠️", "데이터 없음", "엔코더에서 $ANG 데이터가 들어오지 않아요. 전원(빨강 5V / 초록 GND)과 흰색(RS232)선 → 컨버터 RX 연결을 확인하세요."],
+  };
+  const [i, t, d] = map[kind];
+  $("stIcon").textContent = i; $("stText").textContent = t; $("stDetail").textContent = d;
+}
+
+// 열린 시간 표시 + 데이터 끊김 감시 (0.5초마다)
+let lastDataAt = 0;
+setInterval(() => {
+  $("nOpenTime").textContent = isOpen ? ((Date.now() - openedAt) / 1000).toFixed(0) + "초" : "–";
+  if (port && Date.now() - lastDataAt > 3000) setStatus("nodata");
+}, 500);
+
+// ---------------- 계기판 (기준각 대비 변화) ----------------
+// 변화 -60° ~ +60° 를 계기판 -135° ~ +135° 에 확대해서 표시 (문이 열려도 26° 정도라 확대)
+const DIAL_RANGE = 60;
+const DIAL_SCALE = 135 / DIAL_RANGE;
+function arc(r, a0, a1) {            // a0, a1: 변화 각도(°) → 계기판 위치로 변환해서 호 그리기
+  const p = a => { const t = (a * DIAL_SCALE - 90) * Math.PI / 180; return [120 + r * Math.cos(t), 120 + r * Math.sin(t)]; };
+  const [x0, y0] = p(a0), [x1, y1] = p(a1);
+  return `M${x0.toFixed(1)} ${y0.toFixed(1)} A${r} ${r} 0 ${(a1 - a0) * DIAL_SCALE > 180 ? 1 : 0} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
+}
+function drawDial() {
+  const R = DIAL_RANGE, o = Math.min(settings.open, R), c = Math.min(settings.close, R);
+  $("arcTrack").setAttribute("d", arc(100, -R, R));
+  $("arcClose").setAttribute("d", arc(100, -c, c));
+  $("arcOpenL").setAttribute("d", arc(100, -R, -o));
+  $("arcOpenR").setAttribute("d", arc(100, o, R));
+}
+(function ticks() {
+  let s = "";
+  for (let a = -DIAL_RANGE; a <= DIAL_RANGE; a += 5) {
+    const major = a % 15 === 0, rot = a * DIAL_SCALE;
+    s += `<line x1="120" y1="27" x2="120" y2="${major ? 40 : 33}" stroke="var(--muted)" stroke-width="${major ? 2 : 1}" transform="rotate(${rot} 120 120)"/>`;
+    if (major) {
+      const t = (rot - 90) * Math.PI / 180, x = 120 + 70 * Math.cos(t), y = 120 + 70 * Math.sin(t) + 4;
+      s += `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="11" fill="var(--muted)">${a > 0 ? "+" + a : a}</text>`;
+    }
+  }
+  $("ticks").innerHTML = s;
+})();
+setInterval(drawDial, 300);
+drawDial();
+
+// ---------------- 데이터 기록 (그래프 + CSV) ----------------
+const CHART_SPAN = 60000;              // 그래프: 최근 60초
+const DATA_MAX = 36000;                // CSV 각도 데이터: 0.1초 간격 × 1시간
+let chartBuf = [];                     // [시각(ms), 변화각]  20Hz
+let dataLog = [];                      // [시각(ms), 각도, 변화각, 상태]  10Hz
+let events = [];                       // 개폐 기록
+let openDurations = [];                // 닫힐 때마다 열려 있던 시간(ms)
+let lastChartAt = 0, lastDataLogAt = 0;
+
+function recordSample(t, deg, signed) {
+  if (t - lastChartAt >= 50) {
+    lastChartAt = t;
+    chartBuf.push([t, signed, deg]);          // [시각, 변화각, 현재 각도]
+    while (chartBuf.length && chartBuf[0][0] < t - CHART_SPAN) chartBuf.shift();
+  }
+  if (t - lastDataLogAt >= 100) {
+    lastDataLogAt = t;
+    dataLog.push([t, deg, signed, isOpen ? "열림" : "닫힘"]);
+    if (dataLog.length > DATA_MAX + 1000) dataLog.splice(0, dataLog.length - DATA_MAX);
+  }
+}
+function addEvent(t, type, deg, delta, extra) {
+  events.push([t, type, deg.toFixed(1), delta.toFixed(1), extra]);
+}
+
+// 날짜/시간 문자열
+const pad = n => String(n).padStart(2, "0");
+function stamp(t, ms = false) {
+  const d = new Date(t);
+  const s = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return ms ? s + "." + String(d.getMilliseconds()).padStart(3, "0").slice(0, 1) : s;
+}
+const fmtSec = ms => ms >= 60000 ? `${Math.floor(ms / 60000)}분 ${Math.round(ms % 60000 / 1000)}초` : `${(ms / 1000).toFixed(1)}초`;
+
+// 통계 표시
+setInterval(() => {
+  const cur = isOpen ? Date.now() - openedAt : 0;
+  const total = openDurations.reduce((a, b) => a + b, 0) + cur;
+  const max = Math.max(0, cur, ...openDurations);
+  $("stTotal").textContent = fmtSec(total);
+  $("stMax").textContent = fmtSec(max);
+  $("stAvg").textContent = openDurations.length ? fmtSec(openDurations.reduce((a, b) => a + b, 0) / openDurations.length) : "–";
+  $("stRows").textContent = dataLog.length.toLocaleString();
+}, 500);
+
+// 파일 내려받기 (엑셀에서 한글이 깨지지 않도록 BOM 추가)
+function download(name, text, type = "text/csv;charset=utf-8") {
+  const a = document.createElement("a");
+  const blob = text instanceof Blob ? text : new Blob([type.startsWith("text/csv") ? "﻿" + text : text], { type });
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const fileDate = () => stamp(Date.now()).replace(/[-: ]/g, "").slice(0, 12);   // 202610010802
+$("btnCsvEvents").onclick = () => {
+  if (!events.length) return alert("아직 개폐 기록이 없어요.");
+  const rows = [["시간", "이벤트", "각도(°)", "기준각 대비 변화(°)", "열려 있던 시간(초)"],
+                ...events.map(e => [stamp(e[0]), ...e.slice(1)])];
+  download(`냉장고문_개폐기록_${fileDate()}.csv`, rows.map(r => r.join(",")).join("\r\n"));
+};
+$("btnCsvData").onclick = () => {
+  if (!dataLog.length) return alert("아직 각도 데이터가 없어요.");
+  const rows = [["시간", "각도(°)", "기준각 대비 변화(°, 문 열림 방향 +)", "상태"],
+                ...dataLog.map(r => [stamp(r[0], true), r[1].toFixed(1), toShown(r[2]).toFixed(1), r[3]])];
+  download(`냉장고문_각도데이터_${fileDate()}.csv`, rows.map(r => r.join(",")).join("\r\n"));
+};
+
+// ---------------- 실시간 그래프 ----------------
+function drawChart() {
+  const cv = $("chart"), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w) return;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  const L = 44, R = 12, T = 10, B = 24, pw = w - L - R, ph = h - T - B;
+  const now = Date.now();
+
+  // 세로축: 0° ~ 위쪽 자동 조절 (10° 단위). 위쪽(+) = 문 열림 방향, 0° 아래 값은 0° 에 붙여서 표시
+  let maxPos = 0;
+  for (const p of chartBuf) { const v = toShown(p[1]); if (v > maxPos) maxPos = v; }
+  // 가장 크게 열린 값 위로 약간 여유를 둠
+  const top = Math.max(10, Math.ceil(Math.max(settings.open * 1.6, maxPos * 1.2) / 10) * 10);
+  const bot = 0;
+  const clampV = v => Math.max(-bot, Math.min(top, v));
+  const x = t => L + (1 - (now - t) / CHART_SPAN) * pw;
+  const y = v => T + (top - v) / (top + bot) * ph;
+
+  // 열림 구간(빨강) / 닫힘 구간(초록) 배경
+  ctx.globalAlpha = 0.10; ctx.fillStyle = col("--open");
+  ctx.fillRect(L, T, pw, y(settings.open) - T);
+  ctx.globalAlpha = 0.16; ctx.fillStyle = col("--closed");
+  ctx.fillRect(L, y(settings.close), pw, Math.min(y(-settings.close), T + ph) - y(settings.close));
+  ctx.globalAlpha = 1;
+
+  // 눈금
+  ctx.font = "11px 'Malgun Gothic', sans-serif"; ctx.fillStyle = col("--muted");
+  ctx.strokeStyle = col("--line"); ctx.lineWidth = 1;
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const v of [0, top / 2, top]) {
+    ctx.beginPath(); ctx.moveTo(L, y(v)); ctx.lineTo(L + pw, y(v)); ctx.stroke();
+    ctx.fillText(v + "°", L - 6, y(v));
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const s of [60, 45, 30, 15, 0]) ctx.fillText(s ? `-${s}초` : "지금", x(now - s * 1000), T + ph + 6);
+
+  // 열림 판단선 (점선)
+  ctx.setLineDash([5, 4]); ctx.strokeStyle = col("--open"); ctx.lineWidth = 1.2;
+  for (const v of [settings.open]) { ctx.beginPath(); ctx.moveTo(L, y(v)); ctx.lineTo(L + pw, y(v)); ctx.stroke(); }
+  ctx.setLineDash([]);
+
+  if (chartBuf.length < 2) {
+    ctx.fillStyle = col("--muted"); ctx.textBaseline = "middle";
+    ctx.fillText("엔코더를 연결하거나 체험을 시작하면 그래프가 그려져요", L + pw / 2, T + ph / 2 - 20);
+    return;
+  }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(L, T - 6, pw + 6, ph + 12); ctx.clip();   // 60초보다 오래된 선은 그래프 밖으로 안 나가게
+  ctx.lineWidth = 2; ctx.lineJoin = "round";
+  // 기준각 대비 변화 선 (빨강)
+  ctx.strokeStyle = col("--open");
+  ctx.beginPath();
+  chartBuf.forEach(([t, v], i) => { const px = x(t), py = y(clampV(toShown(v))); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+  ctx.stroke();
+  // 마지막 값 점
+  const [lt, lv] = chartBuf[chartBuf.length - 1];
+  ctx.fillStyle = col("--open");
+  ctx.beginPath(); ctx.arc(x(lt), y(clampV(toShown(lv))), 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+setInterval(drawChart, 100);
+window.addEventListener("resize", drawChart);
+
+// ---------------- 소스코드 다운로드 ----------------
+$("dlHtml").onclick = () => download("fridge_door_monitor_web.html", PAGE_SOURCE, "text/html;charset=utf-8");
+// 파이썬 코드는 ZIP 으로 묶어서 받기
+//   .py 를 그대로 받으면 Edge/Chrome 이 "장치를 손상시킬 수 있습니다" 경고를 띄우므로 (실행 파일 종류라서)
+//   경고가 뜨지 않는 .zip 으로 묶어서 내려줌
+const README = `EN25-Absolute 냉장고 문 모니터 - 파이썬 예제 (드림솔루션)
+
+[준비물]
+- 앱솔루트 로터리엔코더 EN25-Absolute
+- USB TO RS232/TTL 컨버터 모듈
+- 냉장고에 붙일 링크·자석 브라겟 세트
+  (모든 준비물은 아래 상품 정보 링크주소에서 구매가능)
+- 배선: 빨강 → 5V, 초록 → GND, 흰색(RS232) → USB TO RS232/TTL 컨버터 모듈의 RX  (통신속도 38400bps)
+
+[실행 방법]
+1. Python 3 를 설치합니다.  https://www.python.org
+2. 명령 프롬프트에서 필요한 패키지를 설치합니다.
+       pip install pyserial pywin32
+3. fridge_door_monitor.py 를 IDLE 로 열고, 파일 위쪽의 PORT 값을
+   엔코더가 연결된 포트(예: "COM5")로 바꿉니다.
+   (장치 관리자 > 포트(COM & LPT) 에서 확인)
+4. 냉장고 문을 닫은 상태에서 F5 (Run Module) 를 누릅니다.
+   문이 열리면 "냉장고 문이 열렸어요" 음성이 나옵니다.
+
+[상품 정보]
+https://www.dreamparts.co.kr/goods/goods_view.php?goodsNo=1000000042
+`;
+
+// 압축하지 않고 묶기만 하는 간단한 ZIP 만들기 (외부 라이브러리 없이)
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+const crc32 = b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function makeZip(files) {                              // files: [{ name, text }]
+  const enc = new TextEncoder(), parts = [], central = [];
+  const d = new Date();
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));      // 파일 머리말
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+    lh.setUint16(10, time, true); lh.setUint16(12, date, true); lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, name.length, true);
+    parts.push(lh, name, data);
+    const ch = new DataView(new ArrayBuffer(46));      // 목록 항목
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint16(12, time, true); ch.setUint16(14, date, true); ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(ch, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((n, p) => n + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));       // 끝 표시
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end], { type: "application/zip" });
+}
+$("dlPy").onclick = () => download("fridge_door_monitor_python.zip", makeZip([
+  { name: "fridge_door_monitor.py", text: $("srcPython").textContent.replace(/^\n/, "") },
+  { name: "README.txt", text: "\ufeff" + README },
+]));
+
+// ---------------- 시리얼 연결 ----------------
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();      // 포트 선택 창
+    await port.open({ baudRate: BAUDRATE });
+  } catch (e) {
+    port = null;
+    if (e.name !== "NotFoundError") alert("포트를 열 수 없어요.\n다른 프로그램(IDLE 등)이 COM 포트를 쓰고 있으면 먼저 닫아주세요.\n\n" + e.message);
+    return;
+  }
+  const info = port.getInfo();
+  $("connText").textContent = `연결됨 (USB ${info.usbVendorId?.toString(16) ?? "?"}:${info.usbProductId?.toString(16) ?? "?"}, ${BAUDRATE}bps)`;
+  $("dot").classList.add("on");
+  $("btnConnect").disabled = true; $("btnDisconnect").disabled = false;
+  // 시뮬레이션이 켜져 있었다면 완전히 끄기 (안 끄면 가상 각도가 실제 데이터에 섞임)
+  $("cSim").checked = false; $("simBox").style.display = "none";
+  clearInterval(simTimer); simTimer = null;
+  setAuto(false); updateDemoButton();
+  document.title = PAGE_TITLE;
+  startCalibration();
+  lastDataAt = Date.now();
+  readLoop();
+}
+
+async function readLoop() {
+  keepReading = true;
+  const decoder = new TextDecoderStream();
+  readClosed = port.readable.pipeTo(decoder.writable).catch(() => {});
+  reader = decoder.readable.getReader();
+  let buf = "";
+  try {
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {       // 한 줄씩 잘라서 처리
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        const d = parseLine(line);
+        if (d) { lastDataAt = Date.now(); onAngle(d.deg); }
+      }
+    }
+  } catch (e) {
+    if (keepReading) log("w", `🔌 엔코더 연결이 끊어졌어요 (${e.message}). USB 연결을 확인한 뒤 다시 연결해주세요.`);
+  } finally {
+    reader.releaseLock();
+    await readClosed;
+    // '연결 끊기' 버튼이 아닌데 읽기가 끝났으면 (USB 가 빠짐 등) 화면도 '연결 안 됨' 으로 되돌림
+    if (keepReading) disconnect();
+  }
+}
+
+async function disconnect() {
+  keepReading = false;
+  try { await reader?.cancel(); } catch {}
+  // 포트를 읽고 있던 연결(pipeTo)이 완전히 풀린 뒤에 닫아야 함
+  //  (풀리기 전에 close() 하면 조용히 실패해서 포트가 열린 채로 남고, 다시 연결할 때 오류가 남)
+  try { await readClosed; } catch {}
+  try { await port?.close(); } catch {}
+  port = null;
+  $("dot").classList.remove("on");
+  $("connText").textContent = "연결 안 됨";
+  $("btnConnect").disabled = false; $("btnDisconnect").disabled = true; $("btnCalib").disabled = true;
+  setStatus("idle");
+}
+
+function startCalibration() {
+  closedAngle = null; calibBuf = []; isOpen = false;
+  $("nDelta").textContent = "–";
+  setStatus("calib");
+}
+
+// ---------------- 시뮬레이션 ----------------
+let simTimer = null;
+function setSim(on) {
+  $("simBox").style.display = on ? "block" : "none";
+  clearInterval(simTimer); simTimer = null;
+  document.title = on ? "[시뮬레이션] " + PAGE_TITLE : PAGE_TITLE;
+  stopRemindSpeech();
+  isOpen = false;
+  if (on) {
+    if (port) disconnect();
+    startCalibration();
+    simTimer = setInterval(() => {
+      if (autoOn) {                                     // 자동 시연: 슬라이더를 저절로 움직임
+        const v = autoAngle(Date.now() - autoStart);
+        $("sSim").value = v; $("vSim").textContent = v.toFixed(1) + "°";
+      }
+      const base = 120;                                 // 가상의 닫힘 각도
+      const noise = (Math.random() - 0.5) * 0.2;
+      onAngle(((base + parseFloat($("sSim").value) + noise) % 360 + 360) % 360);
+    }, 10);                                             // 엔코더처럼 100Hz
+    lastDataAt = Date.now();
+  } else {
+    setAuto(false);
+    setStatus("idle");
+  }
+  updateDemoButton();
+}
+
+// 자동 시연: 닫힘 5초 → 1초 동안 열림 → 12초 열려 있음(다시 알림 확인용) → 1초 동안 닫힘 (19초 반복)
+const AUTO_OPEN = -26;                                  // 실제 냉장고에서 문을 열었을 때 변화량과 비슷하게
+let autoOn = false, autoStart = 0;
+function autoAngle(ms) {
+  const s = (ms / 1000) % 19;
+  const ease = p => p * p * (3 - 2 * p);                // 부드럽게 출발/정지
+  if (s < 5) return 0;
+  if (s < 6) return AUTO_OPEN * ease(s - 5);
+  if (s < 18) return AUTO_OPEN + Math.sin(s * 2.1) * 0.6;  // 열려 있는 동안 살짝 흔들림
+  return AUTO_OPEN * (1 - ease(s - 18));
+}
+function setAuto(on) {
+  autoOn = on; $("cAuto").checked = on;
+  if (on) autoStart = Date.now();
+  else { $("sSim").value = 0; $("vSim").textContent = "0.0°"; }
+}
+
+// 체험 모드 시작/멈춤 (버튼 클릭이 있어야 브라우저가 소리를 허락함)
+function updateDemoButton() {
+  $("btnDemo").textContent = simTimer ? "■ 체험 멈추기" : "▶ 체험 시작 (소리 켜짐)";
+}
+$("btnDemo").onclick = () => {
+  if (simTimer) { $("cSim").checked = false; setSim(false); return; }
+  if (!settings.voice) { settings.voice = true; $("cVoice").checked = true; }
+  window.speechSynthesis?.resume();
+  $("cSim").checked = true; setSim(true); setAuto(true);
+  log("c", "🎬 체험 모드를 시작했어요. 잠시 후 가상의 문이 열려요.");
+};
+
+// ---------------- 버튼 / 슬라이더 ----------------
+$("btnConnect").onclick = connect;
+$("btnDisconnect").onclick = disconnect;
+$("btnCalib").onclick = () => { startCalibration(); log("c", "기준각을 다시 측정합니다."); };
+$("btnTest").onclick = () => { const v = settings.voice; settings.voice = true; speak("냉장고 문이 열렸어요"); settings.voice = v; };
+$("btnClear").onclick = () => {
+  $("log").innerHTML = ""; openCount = 0; $("nCount").textContent = 0;
+  events = []; openDurations = []; dataLog = []; chartBuf = [];
+  drawChart();
+};
+$("cAuto").onchange = e => setAuto(e.target.checked);
+$("cVoice").onchange = e => { settings.voice = e.target.checked; saveSettings(); };
+$("cSim").onchange = e => setSim(e.target.checked);
+$("sSim").oninput = e => $("vSim").textContent = parseFloat(e.target.value).toFixed(1) + "°";
+
+function bindRange(id, key, label, fmt) {
+  const el = $(id);
+  const update = () => {
+    settings[key] = parseFloat(el.value);
+    // 닫힘 각도는 항상 열림 각도보다 작아야 함
+    if (settings.close >= settings.open) {
+      if (key === "open") { settings.close = Math.max(0.5, settings.open - 0.5); $("sClose").value = settings.close; $("vClose").textContent = settings.close.toFixed(1) + "°"; }
+      else { settings.close = settings.open - 0.5; el.value = settings.close; }
+    }
+    $(label).textContent = fmt(settings[key]);
+    saveSettings();
+  };
+  el.oninput = update;
+}
+function saveSettings() {
+  try { localStorage.setItem("fridgeDoor-v3", JSON.stringify(settings)); } catch {}
+}
+bindRange("sOpen", "open", "vOpen", v => v.toFixed(1) + "°");
+bindRange("sClose", "close", "vClose", v => v.toFixed(1) + "°");
+bindRange("sRemind", "remind", "vRemind", v => v ? v + "초" : "끄기");
+
+// 지난번 설정 불러오기
+try {
+  const s = JSON.parse(localStorage.getItem("fridgeDoor-v3") || "null");
+  if (s) {
+    Object.assign(settings, s);
+    $("sOpen").value = settings.open; $("vOpen").textContent = settings.open.toFixed(1) + "°";
+    $("sClose").value = settings.close; $("vClose").textContent = settings.close.toFixed(1) + "°";
+    $("sRemind").value = settings.remind; $("vRemind").textContent = settings.remind ? settings.remind + "초" : "끄기";
+    $("cVoice").checked = settings.voice;
+  }
+} catch {}
+
+if (!("serial" in navigator)) {
+  $("noSerial").style.display = "block";
+  $("btnConnect").disabled = true;
+}
+// 체험 모드 배너: 주소 끝에 ?demo 를 붙였거나 엔코더 연결을 못 하는 브라우저면 표시
+if (new URLSearchParams(location.search).has("demo") || !("serial" in navigator)) {
+  $("demoBanner").style.display = "flex";
+}
+setStatus("idle");
+</script>
+</body>
+</html>
